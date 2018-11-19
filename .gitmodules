@@ -1,0 +1,3 @@
+[submodule "dcca_loss"]
+	path = dcca_loss
+	url = https://github.com/haasdo95/dcca_loss
