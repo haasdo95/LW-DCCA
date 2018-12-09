@@ -18,6 +18,8 @@ from dcca_loss import CorrLoss
 parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
 parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                     help='input batch size for training (default: 64)')
+parser.add_argument('--cv-batch-size', type=int, default=128, metavar='N',
+                    help='input batch size for CV (default: 128)')
 parser.add_argument('--left-width', type=int, default=2038, metavar='N',
                     help='width of linear layer on the left (default: 2038)')
 parser.add_argument('--right-width', type=int, default=1608, metavar='N',
@@ -26,8 +28,8 @@ parser.add_argument('--epochs', type=int, default=10, metavar='N',
                     help='number of epochs to train (default: 10)')
 parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                     help='learning rate (default: 0.01)')
-parser.add_argument('--use-cuda', action='store_true', default=True,
-                    help='enables CUDA training')
+parser.add_argument('--disable-cuda', action='store_true', default=False,
+                    help='disables CUDA training')
 parser.add_argument('--gpu_num', type=int, default=0, metavar='S',
                     help='decides which gpu to use')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
@@ -42,14 +44,15 @@ parser.add_argument('--weight-dir', type=str, metavar='N',
                     help='directory to store model weights')
 parser.add_argument('--cca-reg', type=float,
                     help='<=0 if using Ledoit')
-parser.add_argument('--mu-gradient', action='store_true', default=True,
+parser.add_argument('--mu-gradient', action='store_true', default=False,
                     help='allows gradient to flow through mu')
 args = parser.parse_args()
 
 batch_size = args.batch_size
+cv_batch_size = args.cv_batch_size
 epochs = args.epochs
 lr = args.lr
-use_cuda = args.use_cuda
+disable_cuda = args.disable_cuda
 left_width = args.left_width
 right_width = args.right_width
 weight_dir = args.weight_dir
@@ -59,6 +62,14 @@ log_interval = args.log_interval
 cca_reg = args.cca_reg
 ledoit = cca_reg is None or cca_reg <= 0
 mu_gradient = ledoit and args.mu_gradient  # True if we want to take gradient through mu
+
+if ledoit:
+    print("Using Ledoit")
+
+if mu_gradient:
+    print("Allow grad to flow through mu")
+else:
+    print("Don't allow grad to flow through mu")
 
 
 def force_mkdir(dir):
@@ -73,9 +84,11 @@ force_mkdir(log_dir)
 force_mkdir(weight_dir)
 writer = SummaryWriter(log_dir)
 
-if use_cuda:
+if not disable_cuda:
+    print("Using GPU")
     device = torch.device("cuda:"+str(args.gpu_num))
 else:
+    print("Using CPU")
     device = torch.device("cpu")
 
 torch.manual_seed(args.seed)
@@ -106,10 +119,12 @@ train_sampler = SubsetRandomSampler(train_idx)
 validation_sampler = SubsetRandomSampler(validation_idx)
 train_loader = torch.utils.data.DataLoader(train_dataset,
                                            batch_size=batch_size,
-                                           sampler=train_sampler)
+                                           sampler=train_sampler,
+                                           drop_last=True)
 cv_loader = torch.utils.data.DataLoader(train_dataset,
-                                        batch_size=batch_size,
-                                        sampler=validation_sampler)
+                                        batch_size=cv_batch_size,
+                                        sampler=validation_sampler,
+                                        drop_last=True)
 
 # download and transform test dataset
 test_loader = torch.utils.data.DataLoader(datasets.MNIST('mnist_data',
@@ -120,7 +135,8 @@ test_loader = torch.utils.data.DataLoader(datasets.MNIST('mnist_data',
                                                              transforms.Normalize((0.1307,), (0.3081,))  # normalize inputs
                                                          ])),
                                           batch_size=batch_size,
-                                          shuffle=True)
+                                          shuffle=True,
+                                          drop_last=True)
 # End of gathering datasets
 
 
@@ -164,15 +180,17 @@ def collapse_dim(data):
     return torch.reshape(data, (data.shape[0], -1))
 
 
-def train(epoch):
+def train():
     model.train()
     for batch_idx, (data, label) in enumerate(train_loader):
         data = data.to(device=device)
         left_out, right_out = model(data)
 
+        # TODO: work with left_out and right_out
+
         loss = CorrLoss(left_out, right_out, cca_reg, ledoit, mu_gradient)
         if ledoit:
-            loss, s11, mu11, s22, mu22 = loss
+            loss, s11, s22 = loss
         loss.backward()
         optimizer.step()
 
@@ -182,23 +200,15 @@ def train(epoch):
 
         if batch_idx % log_interval == 0:
             niter = epoch * len(train_loader) + batch_idx
-            quick_cv_loss = quick_validation(3)
-            writer.add_scalar("CV/QuickLoss", quick_cv_loss, niter)
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tCVLoss: {:.6f}'.format(
+
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx, len(train_loader),
-                   100. * batch_idx / len(train_loader), loss.item(), quick_cv_loss))
+                   100. * batch_idx / len(train_loader), loss.item()))
             writer.add_scalar('Train/Loss', loss.item(), niter)
 
             if ledoit:
                 writer.add_scalar("Shrinkage11", s11.item(), niter)
                 writer.add_scalar("Shrinkage22", s22.item(), niter)
-                writer.add_scalar("mu11", mu11.item(), niter)
-                writer.add_scalar("mu22", mu22.item(), niter)
-                try:
-                    writer.add_scalar("EquivCCAReg11", s11.item() * mu11.item() / (1 - s11.item()), niter)
-                    writer.add_scalar("EquivCCAReg22", s22.item() * mu22.item() / (1 - s22.item()), niter)
-                except ZeroDivisionError:
-                    print("Seeing shrinkage of 1.0 at global step {}".format(niter))
 
 
 # run a few batches to have a feeling of the cv loss
@@ -215,7 +225,7 @@ def quick_validation(num_batches):
             loss, s11, mu11, s22, mu22 = loss
         mean_loss += loss.item()
     model.train()
-    return mean_loss
+    return mean_loss / batch_idx
 
 
 def validation():  # run over the whole cv set
@@ -236,8 +246,9 @@ if __name__ == "__main__":
                                   verbose=True)
 
     for epoch in range(epochs):
-        train(epoch)
+        train()
         # run validation after each epoch
         cv_loss = validation()
+        print("Iter: {}; CVLoss: {}".format((epoch + 1) * len(train_loader), cv_loss))
         writer.add_scalar("CV/Loss", cv_loss, (epoch + 1) * len(train_loader))
         scheduler.step(cv_loss)
