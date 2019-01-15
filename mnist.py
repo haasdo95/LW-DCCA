@@ -194,9 +194,9 @@ def train():
         loss.backward()
         optimizer.step()
 
-        if batch_idx % weight_interval == 0:
-            niter = epoch * len(train_loader) + batch_idx
-            save_model(model, niter, loss.item())
+        # if batch_idx % weight_interval == 0:
+        #     niter = epoch * len(train_loader) + batch_idx
+        #     save_model(model, niter, loss.item())
 
         if batch_idx % log_interval == 0:
             niter = epoch * len(train_loader) + batch_idx
@@ -213,6 +213,9 @@ def train():
 
 # run a few batches to have a feeling of the cv loss
 def quick_validation(num_batches):
+    """
+    Always use vanilla CCA in cross validation
+    """
     model.eval()
     mean_loss = 0
     for batch_idx, (data, label) in enumerate(cv_loader):
@@ -220,12 +223,10 @@ def quick_validation(num_batches):
             break
         data = data.to(device=device)
         left_out, right_out = model(data)
-        loss = CorrLoss(left_out, right_out, cca_reg, ledoit, mu_gradient)
-        if ledoit:
-            loss, s11, mu11, s22, mu22 = loss
+        loss = CorrLoss(left_out, right_out, 0.001, False, mu_gradient)
         mean_loss += loss.item()
     model.train()
-    return mean_loss / batch_idx
+    return mean_loss / (batch_idx + 1)
 
 
 def validation():  # run over the whole cv set
