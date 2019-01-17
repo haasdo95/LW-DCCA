@@ -11,8 +11,11 @@ from torchvision import datasets, transforms
 import argparse
 from tensorboardX import SummaryWriter
 import numpy as np
+import matplotlib.pyplot as plt
+import io
+import PIL
 
-from dcca_loss import CorrLoss
+from dcca_loss import CorrLoss, center, covariance_matrix
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
@@ -30,7 +33,7 @@ parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
                     help='learning rate (default: 0.01)')
 parser.add_argument('--disable-cuda', action='store_true', default=False,
                     help='disables CUDA training')
-parser.add_argument('--gpu_num', type=int, default=0, metavar='S',
+parser.add_argument('--gpu-num', type=int, default=0, metavar='S',
                     help='decides which gpu to use')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
@@ -180,14 +183,27 @@ def collapse_dim(data):
     return torch.reshape(data, (data.shape[0], -1))
 
 
+# utilities to visualize estimated covariance matrices
+# many thanks to https://discuss.pytorch.org/t/example-code-to-put-matplotlib-graph-to-tensorboard-x/15806
+def gen_matrix_plot(m):
+    """Create a pyplot plot and save to buffer."""
+    plt.figure()
+    plt.matshow(m)
+    plt.title("matrix plot")
+    buf = io.BytesIO()
+    plt.savefig(buf, format='jpeg')
+    buf.seek(0)
+    with PIL.Image.open(buf) as img:
+        return transforms.ToTensor()(img).unsqueeze(0)
+
+
 def train():
     model.train()
     for batch_idx, (data, label) in enumerate(train_loader):
         data = data.to(device=device)
         left_out, right_out = model(data)
 
-        # TODO: work with left_out and right_out
-
+        optimizer.zero_grad()
         loss = CorrLoss(left_out, right_out, cca_reg, ledoit, mu_gradient)
         if ledoit:
             loss, s11, s22 = loss
@@ -205,6 +221,13 @@ def train():
                 epoch, batch_idx, len(train_loader),
                    100. * batch_idx / len(train_loader), loss.item()))
             writer.add_scalar('Train/Loss', loss.item(), niter)
+
+            left_out = center(left_out.t().detach())
+            right_out = center(right_out.t().detach())  # (d * n) afterwards
+            cov_left = covariance_matrix(left_out, 0, None)
+            cov_right = covariance_matrix(right_out, 0, None)
+            writer.add_image("Train/CovLeft", gen_matrix_plot(cov_left.cpu()))
+            writer.add_image("Train/CovRight", gen_matrix_plot(cov_right.cpu()))
 
             if ledoit:
                 writer.add_scalar("Shrinkage11", s11.item(), niter)
